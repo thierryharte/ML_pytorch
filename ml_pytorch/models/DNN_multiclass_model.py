@@ -5,8 +5,11 @@ from ml_pytorch.utils.learning_rate_schedules import get_lr_scheduler
 
 
 class DNN(nn.Module):
-    def __init__(self, dim_in: int, num_classes: int):
+    def __init__(self, dim_in: int, num_classes: int, mean: torch.Tensor, std: torch.Tensor):
         super().__init__()
+
+        self.register_buffer('mean', mean)
+        self.register_buffer('std', std)
         self.net = nn.Sequential(
             nn.Linear(dim_in, 64),
             nn.ReLU(),
@@ -21,6 +24,7 @@ class DNN(nn.Module):
         )
 
     def forward(self, x):
+        x = (x - self.mean) / self.std
         return self.net(x)
 
     def export_model(self, model):
@@ -36,8 +40,8 @@ class DNN(nn.Module):
         return ONNXWrappedModel(model)
 
 
-def get_model(input_size, num_classes, device, lr, lr_schedule, n_epochs):
-    model = DNN(input_size, num_classes).to(device)
+def get_model(input_size, num_classes, device, lr, lr_schedule, n_epochs, mean, std):
+    model = DNN(input_size, num_classes, mean, std).to(device)
     print(model)
 
     # Multi-class single-label classification:

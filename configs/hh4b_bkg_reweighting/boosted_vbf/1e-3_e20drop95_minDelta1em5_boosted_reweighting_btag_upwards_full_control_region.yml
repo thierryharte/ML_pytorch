@@ -1,0 +1,49 @@
+input_variables: bkg_morphing_dnn_boosted_bdt_inputs
+
+classes:
+  data_A:
+    sample: [DATA_JetMET0_HH4bBoosted, DATA_JetMET1_HH4bBoosted]
+    region: [boosted_signal_sideband_region_B]
+    dataset: [DATA_JetMET0_HH4bBoosted_2024_EraC, DATA_JetMET0_HH4bBoosted_2024_EraD, DATA_JetMET0_HH4bBoosted_2024_EraE, DATA_JetMET0_HH4bBoosted_2024_EraF, DATA_JetMET0_HH4bBoosted_2024_EraG, DATA_JetMET0_HH4bBoosted_2024_EraH, DATA_JetMET0_HH4bBoosted_2024_EraI, DATA_JetMET1_HH4bBoosted_2024_EraC, DATA_JetMET1_HH4bBoosted_2024_EraD, DATA_JetMET1_HH4bBoosted_2024_EraE, DATA_JetMET1_HH4bBoosted_2024_EraF, DATA_JetMET1_HH4bBoosted_2024_EraG, DATA_JetMET1_HH4bBoosted_2024_EraH, DATA_JetMET1_HH4bBoosted_2024_EraI,]
+    lbl: 0
+  data_B:
+    sample: [DATA_JetMET0_HH4bBoosted, DATA_JetMET1_HH4bBoosted]
+    region: [boosted_control_sideband_region_D]
+    dataset: [DATA_JetMET0_HH4bBoosted_2024_EraC, DATA_JetMET0_HH4bBoosted_2024_EraD, DATA_JetMET0_HH4bBoosted_2024_EraE, DATA_JetMET0_HH4bBoosted_2024_EraF, DATA_JetMET0_HH4bBoosted_2024_EraG, DATA_JetMET0_HH4bBoosted_2024_EraH, DATA_JetMET0_HH4bBoosted_2024_EraI, DATA_JetMET1_HH4bBoosted_2024_EraC, DATA_JetMET1_HH4bBoosted_2024_EraD, DATA_JetMET1_HH4bBoosted_2024_EraE, DATA_JetMET1_HH4bBoosted_2024_EraF, DATA_JetMET1_HH4bBoosted_2024_EraG, DATA_JetMET1_HH4bBoosted_2024_EraH, DATA_JetMET1_HH4bBoosted_2024_EraI,]
+    lbl: 1
+  ttbar_A:
+    sample: [TTto2L2Nu, TTtoLNu2Q, TTto4Q]
+    region: [boosted_signal_sideband_region_B]
+    dataset: [TTto2L2Nu_2024, TTtoLNu2Q_2024, TTto4Q_2024]
+    lbl: 2
+  ttbar_B:
+    sample: [TTto2L2Nu, TTtoLNu2Q, TTto4Q]
+    region: [boosted_control_sideband_region_D]
+    dataset: [TTto2L2Nu_2024, TTtoLNu2Q_2024, TTto4Q_2024]
+    lbl: 3
+
+
+run2: False
+oversample_split: True
+
+ML_model: DNN_multiclass_model
+
+data_format: parquet
+
+batch_size: 128
+epochs: 200
+
+learning_rate: 1e-3
+learning_rate_schedule: e5_drop95
+
+early_stopping: True
+patience: 20
+min_delta: 1e-5
+
+eval_param: "loss"
+
+train_fraction: 0.8
+val_fraction: 0.15
+test_fraction: 0.05
+
+data_dirs: [/work/tharte/datasets/samples_vbf_boosted/other_group/full_2024_withregions_for_reweight_full_sideband_region/]

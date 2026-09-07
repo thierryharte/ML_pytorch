@@ -1,0 +1,49 @@
+input_variables: bkg_morphing_dnn_boosted_vbf_input_variables
+
+classes:
+  data_A:
+    sample: [DATA_JetMET_JMENano_E, DATA_JetMET_JMENano_F, DATA_JetMET_JMENano_G]
+    region: [boosted_incl_qcd_A_region]
+    dataset: [DATA_JetMET_JMENano_E_2022_postEE_EraE, DATA_JetMET_JMENano_F_2022_postEE_EraF, DATA_JetMET_JMENano_G_2022_postEE_EraG]
+    lbl: 0
+  data_B:
+    sample: [DATA_JetMET_JMENano_E, DATA_JetMET_JMENano_F, DATA_JetMET_JMENano_G]
+    region: [boosted_incl_qcd_B_region]
+    dataset: [DATA_JetMET_JMENano_E_2022_postEE_EraE, DATA_JetMET_JMENano_F_2022_postEE_EraF, DATA_JetMET_JMENano_G_2022_postEE_EraG]
+    lbl: 1
+  ttbar_A:
+    sample: [TTto2L2Nu, TTtoLNu2Q, TTto4Q]
+    region: [boosted_incl_qcd_A_region]
+    dataset: [TTto2L2Nu__2022_postEE, TTtoLNu2Q__2022_postEE, TTto4Q__2022_postEE]
+    lbl: 2
+  ttbar_B:
+    sample: [TTto2L2Nu, TTtoLNu2Q, TTto4Q]
+    region: [boosted_incl_qcd_B_region]
+    dataset: [TTto2L2Nu__2022_postEE, TTtoLNu2Q__2022_postEE, TTto4Q__2022_postEE]
+    lbl: 3
+
+
+run2: False
+oversample_split: True
+
+ML_model: DNN_multiclass_model
+
+data_format: coffea
+
+batch_size: 128
+epochs: 50
+
+learning_rate: 1e-4
+learning_rate_schedule: e5_drop95
+
+early_stopping: True
+patience: 10
+min_delta: 1e-5
+
+eval_param: "acc"
+
+train_fraction: 0.8
+val_fraction: 0.15
+test_fraction: 0.05
+
+data_dirs: [/work/tharte/datasets/samples_vbf_boosted/no_model/1_16_4_unskimmed_datasets_data_ttbar_msd40_bsubl00_mjj300_bbtagBB_AB_cut06_novbf_category/]

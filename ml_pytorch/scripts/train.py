@@ -86,7 +86,7 @@ def main():
 
     name = main_dir.rstrip("/").split("/")[-1]  # actually run number
     name_configuration = os.path.basename(cfg_file_name).rsplit('.', 1)[0]  # split once from right side at . and take first part (should remove ending of file)
-    type_configuration  = cfg_file_name.split("/")[-2]  # Should give name of type by choice of in which folder the config file is saved. Watch out, if we have subfolders.
+    type_configuration  = cfg_file_name.split("/")[-2] if "hh4b" in cfg_file_name.split("/")[-2] else cfg_file_name.split("/")[-3]  # Should give name of type by choice of in which folder the config file is saved. Watch out, if we have subfolders.
 
     best_vloss = 1_000_000.0
     best_vaccuracy = 0.0
@@ -206,6 +206,8 @@ def main():
         batch_size,
         num_classes,
         class_info,
+        mean,
+        std,
     ) = load_data(cfg, cfg.seed)
     
     if cfg.gpus is not None:
@@ -233,14 +235,26 @@ def main():
 
     get_model_sig = _inspect.signature(ML_model.get_model)
     if "num_classes" in get_model_sig.parameters:
-        model, loss_fn, optimizer, scheduler = ML_model.get_model(
-            input_size,
-            num_classes,
-            device,
-            cfg.learning_rate,
-            cfg.learning_rate_schedule,
-            n_epochs,
-        )
+        if "mean" in get_model_sig.parameters:
+            model, loss_fn, optimizer, scheduler = ML_model.get_model(
+                input_size,
+                num_classes,
+                device,
+                cfg.learning_rate,
+                cfg.learning_rate_schedule,
+                n_epochs,
+                mean.to(device),
+                std.to(device),
+            )
+        else:
+            model, loss_fn, optimizer, scheduler = ML_model.get_model(
+                input_size,
+                num_classes,
+                device,
+                cfg.learning_rate,
+                cfg.learning_rate_schedule,
+                n_epochs,
+            )
     else:
         if num_classes > 2:
             raise ValueError(
@@ -249,9 +263,14 @@ def main():
                 "Use a model whose get_model accepts a num_classes argument "
                 "(e.g. DNN_multiclass_model)."
             )
-        model, loss_fn, optimizer, scheduler = ML_model.get_model(
-            input_size, device, cfg.learning_rate, cfg.learning_rate_schedule, n_epochs
-        )
+        if "mean" in get_model_sig.parameters:
+            model, loss_fn, optimizer, scheduler = ML_model.get_model(
+                input_size, device, cfg.learning_rate, cfg.learning_rate_schedule, n_epochs, mean.to(device), std.to(device)
+            )
+        else:
+            model, loss_fn, optimizer, scheduler = ML_model.get_model(
+                input_size, device, cfg.learning_rate, cfg.learning_rate_schedule, n_epochs
+            )
     num_parameters = get_model_parameters_number(model)
 
     logger.info(f"Number of parameters: {num_parameters}")

@@ -39,7 +39,7 @@ def loop_one_batch(
     type_eval,
 ):
     inputs, labels, class_weights, kl_values = data
-    
+
     inputs = inputs.to(device, non_blocking=True)
     labels = labels.to(device, non_blocking=True)
     class_weights = class_weights.to(device, non_blocking=True)
@@ -47,7 +47,7 @@ def loop_one_batch(
 
     event_weights = inputs[:, -1]
     inputs = inputs[:, :-1]
-    weights = event_weights * class_weights.flatten()
+    weights = (event_weights * class_weights.flatten()).clamp(min=0)
 
     # compute the outputs of the model
     outputs = model(inputs)
@@ -57,8 +57,8 @@ def loop_one_batch(
         y_pred = torch.round(outputs)
 
     else:
-        y_pred = outputs.argmax(dim=1)
         labels = labels.type(dtype=torch.long)
+        y_pred = outputs.argmax(dim=1)
 
     # Compute the accuracy
     correct = ((y_pred == labels) * weights).sum().item()

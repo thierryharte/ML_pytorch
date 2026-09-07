@@ -74,56 +74,92 @@ def parse_classes(cfg):
     return classes
 
 
-def oversample_dataset(X_dataset):
+def oversample_dataset(X_dataset, is_binary):
 
-    X_fts, X_lbl, X_clsw = X_dataset[:][0], X_dataset[:][1], X_dataset[:][2]
+    X_fts, X_lbl, X_clsw, X_k = X_dataset[:][0], X_dataset[:][1], X_dataset[:][2], X_dataset[:][3]
 
-    # get the signal and background events
-    X_fts_sig = X_fts[X_lbl == 1]
-    X_lbl_sig = X_lbl[X_lbl == 1]
-    X_clsw_sig = X_clsw[X_lbl == 1]
+    if is_binary:
+        X_fts_sig = X_fts[X_lbl == 1]
+        X_lbl_sig = X_lbl[X_lbl == 1]
+        X_clsw_sig = X_clsw[X_lbl == 1]
+        X_k_sig = X_k[X_lbl == 1]
 
-    X_fts_bkg = X_fts[X_lbl == 0]
-    X_lbl_bkg = X_lbl[X_lbl == 0]
-    X_clsw_bkg = X_clsw[X_lbl == 0]
+        X_fts_bkg = X_fts[X_lbl == 0]
+        X_lbl_bkg = X_lbl[X_lbl == 0]
+        X_clsw_bkg = X_clsw[X_lbl == 0]
+        X_k_bkg = X_k[X_lbl == 0]
 
-    num_events_bkg = int(torch.sum(X_lbl == 0))
-    num_events_sig = int(torch.sum(X_lbl == 1))
+        num_events_bkg = int(torch.sum(X_lbl == 0))
+        num_events_sig = int(torch.sum(X_lbl == 1))
 
-    # TODO: FIX
-    if num_events_sig > num_events_bkg:
-        raise ValueError(
-            "Number of signal events is greater than number of background events. This will be fixed in the oversampling function"
-        )
+        if num_events_sig > num_events_bkg:
+            raise ValueError(
+                "Number of signal events is greater than number of background events."
+            )
 
-    oversample_factor = num_events_bkg // num_events_sig + 1
+        oversample_factor = num_events_bkg // num_events_sig + 1
+        logger.info(f"Oversample factor: {oversample_factor}")
 
-    logger.info(f"Oversample factor: {oversample_factor}")
+        X_fts_sig_oversampled  = X_fts_sig.repeat((oversample_factor, 1))[:num_events_bkg]
+        X_lbl_sig_oversampled  = X_lbl_sig.repeat(oversample_factor)[:num_events_bkg]
+        X_clsw_sig_oversampled = X_clsw_sig.repeat((oversample_factor, 1))[:num_events_bkg]
+        X_k_sig_oversampled    = X_k_sig.repeat(oversample_factor)[:num_events_bkg]
 
-    X_fts_sig_oversampled = X_fts_sig.repeat((oversample_factor, 1))[:num_events_bkg]
-    X_lbl_sig_oversampled = X_lbl_sig.repeat((oversample_factor))[:num_events_bkg]
-    X_clsw_sig_oversampled = X_clsw_sig.repeat((oversample_factor, 1))[:num_events_bkg]
-    logger.info(f"Number of background events {X_fts_bkg.shape[0]}")
-    logger.info(f"Number of signal events before oversampling {X_fts_sig.shape[0]}")
-    logger.info(
-        f"Number of signal events after oversampling {X_fts_sig_oversampled.shape[0]}"
-    )
+        logger.info(f"Number of background events: {num_events_bkg}")
+        logger.info(f"Number of signal events before oversampling: {num_events_sig}")
+        logger.info(f"Number of signal events after oversampling: {X_fts_sig_oversampled.shape[0]}")
 
-    X_fts_oversampled = torch.cat((X_fts_sig_oversampled, X_fts_bkg), dim=0)
-    X_lbl_oversampled = torch.cat((X_lbl_sig_oversampled, X_lbl_bkg), dim=0)
-    X_clsw_oversampled = torch.cat((X_clsw_sig_oversampled, X_clsw_bkg), dim=0)
+        X_fts_out  = torch.cat((X_fts_sig_oversampled,  X_fts_bkg),  dim=0)
+        X_lbl_out  = torch.cat((X_lbl_sig_oversampled,  X_lbl_bkg),  dim=0)
+        X_clsw_out = torch.cat((X_clsw_sig_oversampled, X_clsw_bkg), dim=0)
+        X_k_out    = torch.cat((X_k_sig_oversampled,    X_k_bkg),    dim=0)
 
-    # reshuffle the data
-    idx = np.random.permutation(X_fts_oversampled.shape[0])
-    X_fts_oversampled = X_fts_oversampled[idx]
-    X_lbl_oversampled = X_lbl_oversampled[idx]
-    X_clsw_oversampled = X_clsw_oversampled[idx]
+    else:
+        # Multiclass: oversample all classes to the size of the largest class
+        classes = torch.unique(X_lbl)
+        n_per_class = {int(c): int((X_lbl == c).sum()) for c in classes}
+        n_max = max(n_per_class.values())
+        logger.info(f"Multiclass oversampling — target size per class: {n_max}")
 
-    oversampled_dataset = torch.utils.data.TensorDataset(
-        X_fts_oversampled, X_lbl_oversampled, X_clsw_oversampled
-    )
+        fts_list, lbl_list, clsw_list, k_list = [], [], [], []
+        for c in classes:
+            c = int(c)
+            mask = X_lbl == c
+            n = n_per_class[c]
 
-    return oversampled_dataset
+            X_fts_c  = X_fts[mask]
+            X_lbl_c  = X_lbl[mask]
+            X_clsw_c = X_clsw[mask]
+            X_k_c    = X_k[mask]
+
+            if n < n_max:
+                oversample_factor = n_max // n + 1
+                logger.info(f"Class {c}: oversampling {n} -> {n_max} (factor {oversample_factor})")
+                X_fts_c  = X_fts_c.repeat((oversample_factor, 1))[:n_max]
+                X_lbl_c  = X_lbl_c.repeat(oversample_factor)[:n_max]
+                X_clsw_c = X_clsw_c.repeat((oversample_factor, 1))[:n_max]
+                X_k_c    = X_k_c.repeat(oversample_factor)[:n_max]
+            else:
+                logger.info(f"Class {c}: no oversampling needed ({n} events)")
+
+            fts_list.append(X_fts_c)
+            lbl_list.append(X_lbl_c)
+            clsw_list.append(X_clsw_c)
+            k_list.append(X_k_c)
+
+        X_fts_out  = torch.cat(fts_list,  dim=0)
+        X_lbl_out  = torch.cat(lbl_list,  dim=0)
+        X_clsw_out = torch.cat(clsw_list, dim=0)
+        X_k_out    = torch.cat(k_list,    dim=0)
+
+    # Reshuffle
+    idx = np.random.permutation(X_fts_out.shape[0])
+    X_fts_out  = X_fts_out[idx]
+    X_lbl_out  = X_lbl_out[idx]
+    X_clsw_out = X_clsw_out[idx]
+    X_k_out    = X_k_out[idx]
+
+    return torch.utils.data.TensorDataset(X_fts_out, X_lbl_out, X_clsw_out, X_k_out)
 
 
 def get_variables(
@@ -260,6 +296,17 @@ def get_variables(
 
         # concatenate along event axis
         variables_array = np.concatenate(variables_array_list, axis=1)
+
+        # normalise the per-class event weights to mean 1, mirroring the
+        # coffea path (weights = weights / np.mean(weights)). Done after the
+        # concat so the relative xsec / sum_genweights scaling between a
+        # class's datasets (e.g. the ttbar sub-samples) is preserved, while
+        # the overall class scale matches the other classes going into the
+        # training loss. Without this, classes with tiny physical weights
+        # (ttbar, ~weight/sum_genweights) contribute almost nothing to the
+        # loss and are never learned.
+        # weights is the second-to-last row: input_variables + ["weights", "kl"]
+        variables_array[-2] = variables_array[-2] / np.mean(variables_array[-2])
 
         logger.info(f"variables_array complete shape {variables_array.shape}")
 
@@ -444,24 +491,42 @@ def get_variables(
             # check if collection_N is present to unflatten the variables
             if ":" in k:
                 variable_name, pos = k.split(":")
-                number_per_event = tuple(vars_array[f"{collection}_N"])
-                if not ak.all(number_per_event == number_per_event[0]):
-                    raise ValueError(
-                        f"number of {collection} per event is not the same for all events"
-                    )
-                variables_dict[k] = ak.to_numpy(
-                    ak.unflatten(
-                        vars_array[variable_name][
-                            np.arange(
-                                int(pos),
-                                len(vars_array[variable_name]),
-                                number_per_event[0],
-                            )
-                        ],
-                        1,
-                    )
-                )
+                pos = int(pos)
+                number_per_event = ak.Array(vars_array[f"{collection}_N"])
+                ragged = ak.fill_none(ak.pad_none(ak.unflatten(vars_array[variable_name], number_per_event), pos + 1, axis=1), -999, axis=1)
+                sliced = ragged[:, pos]
+                variables_dict[k] = ak.to_numpy(sliced).reshape(-1,1)
 
+                # Unflatten the flat array back into ragged per-event arrays
+
+                # Check all events have enough jets
+                # min_num = int(ak.min(number_per_event))
+                # if min_num <= pos:
+                #     raise ValueError(
+                #         f"Requested jet index {pos} but some events only have {min_num} jets "
+                #         f"for variable {variable_name}"
+                #     )
+                # if not ak.all(number_per_event == number_per_event[0]):
+                #     logger.warning(
+                #         f"Not all events have the same number of {collection} "
+                #         f"(min={min_num}). Slicing index {pos} from each event."
+                #     )
+                # variables_dict[k] = ak.to_numpy(ragged[:, pos])
+
+                # # Slice the pos-th jet from each event — works for variable-length events
+                # variables_dict[k] = ak.to_numpy(ragged[:, pos])
+                # variables_dict[k] = ak.to_numpy(
+                #     ak.unflatten(
+                #         vars_array[variable_name][
+                #             np.arange(
+                #                 int(pos),
+                #                 len(vars_array[variable_name]),
+                #                 min_num,
+                #             )
+                #         ],
+                #         1,
+                #     ),
+                # )
             elif f"{collection}_N" in vars_array.keys() and k.split("_")[1] != "N":
                 number_per_event = tuple(vars_array[f"{collection}_N"])
                 if ak.all(number_per_event == number_per_event[0]):
@@ -635,9 +700,9 @@ def load_data(cfg, seed):
     # behaviour (signal/background). For multiclass we do not yet support these
     # operations.
     is_binary = num_classes == 2
-    if (cfg.undersample or cfg.oversample_split) and not is_binary:
+    if cfg.undersample and not is_binary:
         raise ValueError(
-            "undersample and oversample_split are only supported for binary classification"
+            "undersample is only supported for binary classification"
         )
 
     if cfg.undersample and is_binary:
@@ -657,24 +722,42 @@ def load_data(cfg, seed):
             f"Number of background events after undersampling {X_per_class[0][0].shape[1]}"
         )
 
-    if cfg.oversample_split and is_binary:
-        X_bkg = X_per_class[0]
-        X_sig = X_per_class[1]
-        logger.info("Performing oversampling of signal before splitting")
-        num_events_sig = X_sig[0].shape[1]
-        num_events_bkg = X_bkg[0].shape[1]
-        repeat = num_events_bkg // num_events_sig + 1
-        X_sig_f = X_sig[0].repeat((1, repeat))[:, :num_events_bkg]
-        X_sig_l = X_sig[1].repeat((1, repeat))[:, :num_events_bkg]
-        X_sig_k = X_sig[2].repeat((1, repeat))[:, :num_events_bkg]
-        X_per_class[1] = (X_sig_f, X_sig_l, X_sig_k)
-        if num_events_sig > num_events_bkg:
-            raise ValueError(
-                "Number of signal events is greater than number of background events."
+    if cfg.oversample_split:
+        if is_binary:
+            X_bkg = X_per_class[0]
+            X_sig = X_per_class[1]
+            logger.info("Performing oversampling of signal before splitting")
+            num_events_sig = X_sig[0].shape[1]
+            num_events_bkg = X_bkg[0].shape[1]
+            repeat = num_events_bkg // num_events_sig + 1
+            X_sig_f = X_sig[0].repeat((1, repeat))[:, :num_events_bkg]
+            X_sig_l = X_sig[1].repeat((1, repeat))[:, :num_events_bkg]
+            X_sig_k = X_sig[2].repeat((1, repeat))[:, :num_events_bkg]
+            X_per_class[1] = (X_sig_f, X_sig_l, X_sig_k)
+            if num_events_sig > num_events_bkg:
+                raise ValueError(
+                    "Number of signal events is greater than number of background events."
+                )
+            logger.info(
+                f"Number of signal events after oversampling {X_per_class[1][0].shape[1]}"
             )
-        logger.info(
-            f"Number of signal events after oversampling {X_per_class[1][0].shape[1]}"
-        )
+        else:
+            n_per_class_current = [X[0].shape[1] for X in X_per_class]
+            n_max = max(n_per_class_current)
+            logger.info(f"Performing oversampling of all classes to {n_max} events (multiclass)")
+            for i, (c, X) in enumerate(zip(class_defs, X_per_class)):
+                n = X[0].shape[1]
+                if n == n_max:
+                    logger.info(f"Class {c['name']}: no oversampling needed ({n} events)")
+                    continue
+                repeat = n_max // n+1
+                X_f = X[0].repeat((1, repeat))[:, :n_max]
+                X_l = X[1].repeat((1, repeat))[:, :n_max]
+                X_k = X[2].repeat((1, repeat))[:, :n_max]
+                X_per_class[i] = (X_f, X_l, X_k)
+                logger.info(
+                    f"Class {c['name']}: oversampled from {n} to {n_max} events"
+                )
 
     # Compute per-class weights so that the sum of weights is the same across
     # all classes (and per-class sum equals N / num_classes). This generalises
@@ -717,6 +800,13 @@ def load_data(cfg, seed):
     logger.info(f"X_clsw shape: {X_clsw.shape}")
     logger.info(f"X_k shape: {X_k.shape}")
 
+    # Normalise inputs:
+    features = X_fts[:, :-1]
+    mean = features.mean(dim=0)
+    std = features.std(dim=0)
+    std[std == 0] = 1.0  # avoid division by zero for constant features
+    X_fts[:, :-1] = (features - mean) / std
+
     tot_num_events = X_fts.shape[0]
 
     # shuffle the tensor with numpy random
@@ -753,14 +843,10 @@ def load_data(cfg, seed):
     )
 
     if cfg.split_oversample:
-        if not is_binary:
-            raise ValueError(
-                "split_oversample is only supported for binary classification"
-            )
         logger.info("Performing oversampling of signal after splitting")
-        train_dataset = oversample_dataset(train_dataset)
-        val_dataset = oversample_dataset(val_dataset)
-        test_dataset = oversample_dataset(test_dataset)
+        train_dataset = oversample_dataset(train_dataset, is_binary)
+        val_dataset = oversample_dataset(val_dataset, is_binary)
+        test_dataset = oversample_dataset(test_dataset, is_binary)
 
     training_loader = None
     val_loader = None
@@ -814,6 +900,8 @@ def load_data(cfg, seed):
         batch_size,
         num_classes,
         class_info,
+        mean,
+        std,
     )
 
 
