@@ -65,11 +65,18 @@ def main():
 
     if cfg.histos:
         from ml_pytorch.scripts.sig_bkg_eval import (
+            plot_kl_distributions,
+        )
+    if cfg.roc:
+        from ml_pytorch.scripts.sig_bkg_eval import (
             plot_roc_curve,
-            plot_sig_bkg_distributions,
         )
     if cfg.history:
         from ml_pytorch.scripts.plot_history import plot_history, plot_lr, read_from_txt
+    if cfg.input_plots:
+        from ml_pytorch.scripts.plot_input_variables import (
+            plot_input_variables_from_loaders,
+        )
 
     # base dir is /work/<username>/
     base_dir = f"/work/{os.environ['USER']}"
@@ -79,9 +86,10 @@ def main():
     else:
         base_dir = f"{base_dir}/out_ML_pytorch"
 
-
     if not cfg.output_dir:
-        cfg.output_dir = f"{base_dir}/{os.path.basename(cfg_file_name).replace('.yml', '')}"
+        cfg.output_dir = (
+            f"{base_dir}/{os.path.basename(cfg_file_name).replace('.yml', '')}"
+        )
     main_dir = cfg.output_dir
 
     name = main_dir.rstrip("/").split("/")[-1]  # actually run number
@@ -105,7 +113,7 @@ def main():
     if cfg.load_model or cfg.eval_model:
         # os.system(f"cp {saved_ML_model_path} {file_dir}/../models/ML_model_loaded.py")
         sys.path.append(main_dir)
-        print('sys.path', sys.path)
+        print("sys.path", sys.path)
         import ML_model
 
         # ML_model = importlib.import_module(saved_ML_model_path.replace("/", ".").replace(".py", ""))
@@ -164,7 +172,9 @@ def main():
     if isinstance(cfg.input_variables, str):
         logger.info("Get Input variables from dnn_inputs")
         logger.info(cfg.input_variables)
-        dnn_input_variables_file = importlib.import_module(f"ml_pytorch.defaults.{cfg.input_variables}")
+        dnn_input_variables_file = importlib.import_module(
+            f"ml_pytorch.defaults.{cfg.input_variables}"
+        )
 
         cfg.input_variables = create_DNN_columns_list(
             cfg.run2, dnn_input_variables_file.dnn_input_variables
@@ -183,8 +193,12 @@ def main():
         comet_logger = start(
             api_key=args.comet_token,
             project_name=name_configuration,
-            workspace=args.comet_workspace if args.comet_workspace else type_configuration.replace('_', '-'),
-            )
+            workspace=(
+                args.comet_workspace
+                if args.comet_workspace
+                else type_configuration.replace("_", "-")
+            ),
+        )
         cfg_dict = OmegaConf.to_container(cfg, resolve=True)
         try:
             del cfg_dict["comet_token"]
@@ -209,7 +223,22 @@ def main():
         mean,
         std,
     ) = load_data(cfg, cfg.seed)
-    
+
+    # plot the input variable distributions of signal and background before training
+    if cfg.input_plots:
+        logger.info("\n\n\n")
+        logger.info("Plotting the input variable distributions")
+        input_plots_dir = plot_input_variables_from_loaders(
+            [training_loader, val_loader, test_loader],
+            input_variables,
+            main_dir,
+            subdir=cfg.input_plots_dir,
+            bins=cfg.input_plots_bins,
+            log_scale=cfg.input_plots_log,
+            comet_logger=comet_logger,
+        )
+        logger.info(f"Input variable distributions saved in {input_plots_dir}")
+
     if cfg.gpus is not None:
         gpus = [int(i) for i in cfg.gpus.split(",")]
         device = torch.device(gpus[0])
@@ -368,8 +397,12 @@ def main():
             if comet_logger:
                 comet_logger.log_metric("loss_epoch_train", avg_loss, epoch=epoch)
                 comet_logger.log_metric("loss_epoch_val", avg_vloss, epoch=epoch)
-                comet_logger.log_metric("accuracy_epoch_train", avg_accuracy, epoch=epoch)
-                comet_logger.log_metric("accuracy_epoch_val", avg_vaccuracy, epoch=epoch)
+                comet_logger.log_metric(
+                    "accuracy_epoch_train", avg_accuracy, epoch=epoch
+                )
+                comet_logger.log_metric(
+                    "accuracy_epoch_val", avg_vaccuracy, epoch=epoch
+                )
 
             # Log the running loss averaged per batch
             # for both training and validation
@@ -447,7 +480,9 @@ def main():
     model.eval()
 
     if args.comet_token:
-        log_model(comet_logger, model=model, model_name=f"model_best_epoch_{best_epoch}")
+        log_model(
+            comet_logger, model=model, model_name=f"model_best_epoch_{best_epoch}"
+        )
 
     if cfg.onnx:
         # export the model to ONNX
@@ -524,19 +559,17 @@ def main():
                 num_classes=np.array(num_classes),
                 class_info=np.array(class_info, dtype=object),
             )
-            
+
         # plot the signal and background distributions
-        if cfg.histos:
-            logger.info("\n\n\n")
-            logger.info("Plotting signal and background distributions")
-            plot_sig_bkg_distributions(
+        if cfg.histos or cfg.roc:
+            plot_kl_distributions(
                 score_lbl_array_train,
                 score_lbl_array_test,
                 main_dir,
-                False,
-                [],
-                # [0.3363, 0.3937],
+                ["all", 1.0],
                 train_test_fractions[1],
+                do_histos=cfg.histos,
+                do_roc=cfg.roc,
                 comet_logger=comet_logger,
                 class_info=class_info,
             )

@@ -1,4 +1,7 @@
-import matplotlib.pyplot as plt
+import os
+import matplotlib
+
+matplotlib.use("Agg")
 import argparse
 import itertools
 import numpy as np
@@ -6,8 +9,16 @@ import mplhep as hep
 from scipy import stats
 from sklearn.metrics import roc_curve, roc_auc_score, auc
 
-hep.style.use("CMS")
-hep.cms.label(loc=0)
+from hist import Hist
+from utils_configs.plot.HEPPlotter import HEPPlotter
+
+LUMITEXT = "(13.6 TeV)"
+
+# CMS colour palette of mplhep: the first colour is used for the background
+# and the second one for the signal, consistently in all the plotting scripts
+CMS_COLORS = [cycle["color"] for cycle in hep.style.CMS["axes.prop_cycle"]]
+BKG_COLOR = CMS_COLORS[0]
+SIG_COLOR = CMS_COLORS[1]
 
 
 def get_layout(score_lbl_tensor):
@@ -109,39 +120,90 @@ def my_roc_auc(
     )
 
 
-def compute_significance(
+def weighted_quantile(values, quantile, weights):
+    """Weighted quantile: returns the value below which `quantile` fraction of total weight lies."""
+    sorted_idx = np.argsort(values)
+    sorted_values = values[sorted_idx]
+    cumulative_weights = np.cumsum(weights[sorted_idx])
+    total_weight = cumulative_weights[-1]
+    return float(np.interp(quantile * total_weight, cumulative_weights, sorted_values))
+
+
+def find_threshold_and_bkg_rejection(
     signal_eff,
+    sig_score_test,
+    bkg_score_test,
+    sig_weight_test,
+    bkg_weight_test,
+):
+    """Find DNN score threshold for target signal efficiency using weighted quantile
+    and compute background rejection as weighted fraction below threshold."""
+    # (1 - signal_eff) quantile → signal_eff fraction of signal is above threshold
+    threshold = weighted_quantile(sig_score_test, 1.0 - signal_eff, sig_weight_test)
+    total_bkg_weight = np.sum(bkg_weight_test)
+    bkg_rejection = (
+        np.sum(bkg_weight_test[bkg_score_test < threshold]) / total_bkg_weight
+        if total_bkg_weight > 0
+        else 0.0
+    )
+    return threshold, bkg_rejection
+
+
+def chi_square(hist_test, hist_train):
+    """Chi2/ndof and p-value between the test and the training distribution.
+
+    Both histograms are normalized to unit integral, as they are drawn, and the
+    empty bins are skipped. The uncertainties of both are propagated.
+    """
+    integral_test = hist_test.values().sum()
+    integral_train = hist_train.values().sum()
+    if integral_test == 0 or integral_train == 0:
+        return np.nan, np.nan
+
+    h_test = hist_test.values() / integral_test
+    h_train = hist_train.values() / integral_train
+    err_test = np.sqrt(hist_test.variances()) / integral_test
+    err_train = np.sqrt(hist_train.variances()) / integral_train
+
+    # remove empty bins
+    mask = (h_test != 0) & (h_train != 0)
+
+    chi_squared = np.sum(
+        (
+            (h_test[mask] - h_train[mask])
+            / np.sqrt(err_test[mask] ** 2 + err_train[mask] ** 2)
+        )
+        ** 2
+    )
+    ndof = len(h_test) - 1
+
+    return chi_squared / ndof, 1 - stats.chi2.cdf(chi_squared, ndof)
+
+
+def compute_significance(
+    dnn_score_target,
     counts_test_list,
     bin_centers,
     bin_width,
-    sig_score_test,
-    bkg_score_test,
     sig_weight_test,
     bkg_weight_test,
     test_fraction,
     rescale,
 ):
-
-    signal_cumulative_integral = np.cumsum(counts_test_list[0][::-1] * bin_width)
-    # find the bin with the signal efficiency closest to target
-    bin_index = np.argmin(np.abs(signal_cumulative_integral[::-1] - signal_eff))
-    # get the DNN score for the target signal efficiency
-    dnn_score_target = bin_centers[bin_index]
-    # compute the background rejection at target signal efficiency
-    bkg_rejection = np.sum(counts_test_list[1][:bin_index] * bin_width[bin_index])
-
-    # compute number of signal and background events in the test dataset above the target signal efficiency threshold
+    """Compute significance from binned density histograms above the DNN score threshold.
+    Integrates the normalized histograms above the threshold to obtain event fractions,
+    then converts to absolute event counts using total weights and rescale factors."""
+    bin_index = np.searchsorted(bin_centers, dnn_score_target)
+    sig_fraction_above = np.sum(counts_test_list[0][bin_index:] * bin_width[bin_index:])
+    bkg_fraction_above = np.sum(counts_test_list[1][bin_index:] * bin_width[bin_index:])
+    sig_rescale = rescale[0] if rescale else 1
+    bkg_rescale = rescale[1] if rescale else 1
     n_sig_above_target = (
-        np.sum(sig_weight_test[sig_score_test > dnn_score_target])
-        / test_fraction
-        * (rescale[0] if rescale else 1)
+        sig_fraction_above * np.sum(sig_weight_test) / test_fraction * sig_rescale
     )
     n_bkg_above_target = (
-        np.sum(bkg_weight_test[bkg_score_test > dnn_score_target])
-        / test_fraction
-        * (rescale[1] if rescale else 1)
+        bkg_fraction_above * np.sum(bkg_weight_test) / test_fraction * bkg_rescale
     )
-    # significance_above_target = n_sig_above_target / np.sqrt(n_bkg_above_target)
     significance_above_target = np.sqrt(
         2
         * (
@@ -150,14 +212,7 @@ def compute_significance(
             - n_sig_above_target
         )
     )
-
-    return (
-        dnn_score_target,
-        bkg_rejection,
-        n_sig_above_target,
-        n_bkg_above_target,
-        significance_above_target,
-    )
+    return n_sig_above_target, n_bkg_above_target, significance_above_target
 
 
 def plot_sig_bkg_distributions(
@@ -167,10 +222,11 @@ def plot_sig_bkg_distributions(
     show,
     rescale,
     test_fraction,
-    signal_eff=0.2,
+    signal_eff=0.8,
     get_max_significance=False,
     comet_logger=None,
     class_info=None,
+    kl_bkg_str=None,
 ):
     # Dispatch to the multi-class variant when the output has more than one
     # score column (i.e. C >= 3 class probabilities are stored).
@@ -190,11 +246,11 @@ def plot_sig_bkg_distributions(
     sig_score_train, bkg_score_train = handle_arrays(score_lbl_tensor_train, 0)
     sig_score_test, bkg_score_test = handle_arrays(score_lbl_tensor_test, 0)
 
-    print("sig_score_train",sig_score_train, sig_score_train.shape)
-    print("bkg_score_train",bkg_score_train, bkg_score_train.shape)
-    print("sig_score_test",sig_score_test, sig_score_test.shape)
-    print("bkg_score_test",bkg_score_test, bkg_score_test.shape)
-    
+    print("sig_score_train", sig_score_train, sig_score_train.shape)
+    print("bkg_score_train", bkg_score_train, bkg_score_train.shape)
+    print("sig_score_test", sig_score_test, sig_score_test.shape)
+    print("bkg_score_test", bkg_score_test, bkg_score_test.shape)
+
     # get weights
     _, _, weight_col, kl_col = get_layout(score_lbl_tensor_test)
     try:
@@ -211,230 +267,57 @@ def plot_sig_bkg_distributions(
         sig_weight_test = np.ones_like(sig_score_test)
         bkg_weight_test = np.ones_like(bkg_score_test)
 
-    print("sig_weight_train",sig_weight_train, sig_weight_train.shape)
-    print("bkg_weight_train",bkg_weight_train, bkg_weight_train.shape)
-    print("sig_weight_test",sig_weight_test, sig_weight_test.shape)
-    print("bkg_weight_test",bkg_weight_test, bkg_weight_test.shape)
-    
+    print("sig_weight_train", sig_weight_train, sig_weight_train.shape)
+    print("bkg_weight_train", bkg_weight_train, bkg_weight_train.shape)
+    print("sig_weight_test", sig_weight_test, sig_weight_test.shape)
+    print("bkg_weight_test", bkg_weight_test, bkg_weight_test.shape)
+
     # get the kl values
     try:
         sig_kl_train, bkg_kl_train = handle_arrays(score_lbl_tensor_train, kl_col)
         sig_kl_test, bkg_kl_test = handle_arrays(score_lbl_tensor_test, kl_col)
     except IndexError:
         print("WARNING: No kl values found in the input file. Using equal weights.")
-        sig_kl_train = np.ones_like(sig_score_train) * 9999.
-        bkg_kl_train = np.ones_like(bkg_score_train) * 9999.
-        sig_kl_test = np.ones_like(sig_score_test) * 9999.
-        bkg_kl_test = np.ones_like(bkg_score_test) * 9999.
-    
-    print("sig_kl_train",sig_kl_train, sig_kl_train.shape)
-    print("bkg_kl_train",bkg_kl_train, bkg_kl_train.shape)
-    print("sig_kl_test",sig_kl_test, sig_kl_test.shape)
-    print("bkg_kl_test",bkg_kl_test, bkg_kl_test.shape)
+        sig_kl_train = np.ones_like(sig_score_train) * 9999.0
+        bkg_kl_train = np.ones_like(bkg_score_train) * 9999.0
+        sig_kl_test = np.ones_like(sig_score_test) * 9999.0
+        bkg_kl_test = np.ones_like(bkg_score_test) * 9999.0
+
+    print("sig_kl_train", sig_kl_train, sig_kl_train.shape)
+    print("bkg_kl_train", bkg_kl_train, bkg_kl_train.shape)
+    print("sig_kl_test", sig_kl_test, sig_kl_test.shape)
+    print("bkg_kl_test", bkg_kl_test, bkg_kl_test.shape)
 
     kl_unique_values = list(np.unique(sig_kl_train))
-    print("kl_unique_values",kl_unique_values)
-    
+    print("kl_unique_values", kl_unique_values)
+
     # loop over the differetn kl for signal and take inclusively for bkg
     for kl in kl_unique_values + ["all"]:
         if kl != "all":
-            sig_score_train_kl=sig_score_train[sig_kl_train==kl]
-            sig_weight_train_kl=sig_weight_train[sig_kl_train==kl]
-            sig_score_test_kl=sig_score_test[sig_kl_test==kl]
-            sig_weight_test_kl=sig_weight_test[sig_kl_test==kl]
+            sig_score_train_kl = sig_score_train[sig_kl_train == kl]
+            sig_weight_train_kl = sig_weight_train[sig_kl_train == kl]
+            sig_score_test_kl = sig_score_test[sig_kl_test == kl]
+            sig_weight_test_kl = sig_weight_test[sig_kl_test == kl]
             kl_str = f"{kl:.2f}"
         else:
-            sig_score_train_kl=sig_score_train
-            sig_weight_train_kl=sig_weight_train
-            sig_score_test_kl=sig_score_test
-            sig_weight_test_kl=sig_weight_test
+            sig_score_train_kl = sig_score_train
+            sig_weight_train_kl = sig_weight_train
+            sig_score_test_kl = sig_score_test
+            sig_weight_test_kl = sig_weight_test
             kl_str = "all"
-        
-        fig, (ax, ax_ratio) = plt.subplots(
-            2,
-            1,
-            figsize=[13, 13],
-            sharex=True,
-            gridspec_kw={"height_ratios": [2.5, 1]},
+
+        # HEPPlotter.set_output strips whatever follows the last dot of the
+        # output path, so the dots of the kl value are replaced with a "p"
+        kl_tag = kl_str.replace("-", "m").replace(".", "p")
+
+        ks_statistic_sig, p_value_sig = stats.ks_2samp(
+            sig_score_train_kl, sig_score_test_kl
         )
-        sig_train = ax.hist(
-            sig_score_train_kl,
-            weights=sig_weight_train_kl,
-            bins=30,
-            range=(0, 1),
-            histtype="step",
-            label=f"Signal (training) - kl = {kl_str}",
-            density=True,
-            edgecolor="blue",
-            facecolor="dodgerblue",
-            fill=True,
-            alpha=0.5,
-        )
-        bkg_train = ax.hist(
-            bkg_score_train,
-            weights=bkg_weight_train,
-            bins=30,
-            range=(0, 1),
-            histtype="step",
-            label="Background (training)",
-            density=True,
-            color="r",
-            fill=False,
-            hatch="\\\\",
-        )
-
-        max_bin = max(max(sig_train[0]), max(bkg_train[0]))
-        # set limit on y-axis
-        ax.set_ylim(top=max_bin * 2)
-        i = 0
-        legend_test_list = []
-        for (
-            score_test,
-            weight_test,
-            score_train,
-            weight_train,
-            color,
-            label,
-            rescale_factor,
-        ) in zip(
-            [sig_score_test_kl, bkg_score_test],
-            [sig_weight_test_kl, bkg_weight_test],
-            [sig_score_train_kl, bkg_score_train],
-            [sig_weight_train_kl, bkg_weight_train],
-            ["blue", "r"],
-            [f"Signal (test) - kl = {kl_str}", "Background (test)"],
-            rescale if rescale else [1, 1],
-        ):
-
-            bins = np.linspace(0, 1, 31)
-            bin_centers = (bins[1:] + bins[:-1]) / 2
-            bin_width = bins[1] - bins[0]
-            weight_test = weight_test / (np.sum(weight_test) * bin_width)
-            weight_train = weight_train / (np.sum(weight_train) * bin_width)
-
-            idx_train = np.digitize(score_train, bins)
-            idx_test = np.digitize(score_test, bins)
-            h_test = []
-            h_train = []
-            err_test = []
-            err_train = []
-
-            for j in range(1, len(bins)):
-                h_test.append(np.sum(weight_test[idx_test == j]))
-                h_train.append(np.sum(weight_train[idx_train == j]))
-                err_test.append(np.sqrt(np.sum(weight_test[idx_test == j] ** 2)))
-                err_train.append(np.sqrt(np.sum(weight_train[idx_train == j] ** 2)))
-
-            h_test = np.array(h_test)
-            h_train = np.array(h_train)
-            err_test = np.array(err_test)
-            err_train = np.array(err_train)
-            
-            print("h_test",h_test)
-            print("h_train",h_train)
-            print("err_test",err_test)
-            print("err_train",err_train)
-                
-
-            ratio = h_test / h_train
-            ratio_err_test = np.sqrt(
-                (err_test / h_train) ** 2 + (h_test * err_train / h_train**2) ** 2
-            )
-            ratio_band_train = err_train / h_train
-
-            legend_test_list.append(
-                ax.errorbar(
-                    bin_centers,
-                    h_test,
-                    yerr=err_test,
-                    marker="o",
-                    color=color,
-                    label=label,
-                    linestyle="None",
-                )
-            )
-
-            # ratio plot
-            ax_ratio.errorbar(
-                bin_centers,
-                ratio,
-                yerr=ratio_err_test,
-                marker="o",
-                color=color,
-                label=label,
-                linestyle="None",
-            )
-            ax_ratio.fill_between(
-                bin_centers,
-                1 - ratio_band_train,
-                1 + ratio_band_train,
-                color=color,
-                alpha=0.2,
-            )
-            ax_ratio.axhline(y=1, color="black", linestyle="--")
-
-            # remove empty bins
-            mask = (h_test != 0 ) & (h_train != 0)
-            h_test_nonzero = h_test[mask]
-            h_train_nonzero = h_train[mask]
-            err_test_nonzero = err_test[mask]
-            err_train_nonzero = err_train[mask]
-            
-            print("h_test_nonzero",h_test_nonzero)
-            print("h_train_nonzero",h_train_nonzero)
-            print("err_test_nonzero",err_test_nonzero)
-            print("err_train_nonzero",err_train_nonzero)
-            
-
-            # compute chi squared
-            chi_squared = np.sum(
-                (
-                    (h_test_nonzero - h_train_nonzero)
-                    / np.sqrt(err_test_nonzero**2 + err_train_nonzero**2)
-                )
-                ** 2
-            )
-            ndof = len(bin_centers) - 1
-            chi2_norm = chi_squared / ndof
-            pvalue = 1 - stats.chi2.cdf(chi_squared, ndof)
-
-            ax.text(
-                0.6,
-                0.75 - 0.05 * i,
-                r"$\chi^2$/ndof= {:.1f},".format(chi2_norm) + f"  p-value= {pvalue:.2f}",
-                horizontalalignment="left",
-                verticalalignment="center",
-                transform=ax.transAxes,
-                color=color,
-                fontsize=20,
-            )
-
-            i += 1
-
-        ks_statistic_sig, p_value_sig = stats.ks_2samp(sig_score_train_kl, sig_score_test_kl)
         ks_statistic_bkg, p_value_bkg = stats.ks_2samp(bkg_score_train, bkg_score_test)
         print(f"\nKS: statistic (sig) = {ks_statistic_sig:.30f}")
         print(f"KS: p-value (sig) = {p_value_sig:.30f}")
         print(f"KS: statistic (bkg) = {ks_statistic_bkg:.30f}")
         print(f"KS: p-value (bkg) = {p_value_bkg:.30f}")
-
-        # print the KS test results on the plot
-        ax.text(
-            0.6,
-            0.925,
-            f"KS: p-value = {p_value_sig:.2f}",
-            fontsize=20,
-            transform=ax.transAxes,
-            color="blue",
-        )
-        ax.text(
-            0.6,
-            0.85,
-            f"KS: p-value = {p_value_bkg:.2f}",
-            fontsize=20,
-            transform=ax.transAxes,
-            color="red",
-        )
 
         # Compute significance
 
@@ -455,67 +338,66 @@ def plot_sig_bkg_distributions(
             bin_width = bins[1:] - bins[:-1]
             bin_centers = 0.5 * (bins[:-1] + bins[1:])
 
-        n_sig = np.sum(sig_weight_test_kl) / test_fraction * (rescale[0] if rescale else 1)
+        n_sig = (
+            np.sum(sig_weight_test_kl) / test_fraction * (rescale[0] if rescale else 1)
+        )
         n_bkg = np.sum(bkg_weight_test) / test_fraction * (rescale[1] if rescale else 1)
         significance = n_sig / np.sqrt(n_bkg)
         print(f"\nNumber of signal events in the test dataset: {n_sig}")
         print(f"Number of background events in the test dataset: {n_bkg}")
         print(f"Significance: {significance:.2f}\n")
-        
-        handles_legend = [
-            sig_train[2][0],
-            legend_test_list[0],
-            bkg_train[2][0],
-            legend_test_list[1],
-        ]
+
+        lines = []
 
         if signal_eff != -1:
             if get_max_significance:
                 max_significance = -1
                 for sig_eff_target in np.linspace(0.0, 1.0, 30):
-                    # compute the significance for each signal efficiency
-                    # and find the DNN cut that maximizes the significance
-                    (infos_significance) = compute_significance(
+                    threshold, bkg_rej = find_threshold_and_bkg_rejection(
                         sig_eff_target,
+                        sig_score_test_kl,
+                        bkg_score_test,
+                        sig_weight_test_kl,
+                        bkg_weight_test,
+                    )
+                    n_sig, n_bkg, significance = compute_significance(
+                        threshold,
                         counts_test_list,
                         bin_centers,
                         bin_width,
-                        sig_score_test_kl,
-                        bkg_score_test,
                         sig_weight_test_kl,
                         bkg_weight_test,
                         test_fraction,
                         rescale,
                     )
-                    if infos_significance[-1] > max_significance:
-                        max_significance = infos_significance[-1]
+                    if significance > max_significance:
+                        max_significance = significance
                         print("max_significance", max_significance)
-                        (
-                            dnn_score_target,
-                            bkg_rejection,
-                            n_sig_above_target,
-                            n_bkg_above_target,
-                            significance_above_target,
-                        ) = infos_significance
+                        dnn_score_target = threshold
+                        bkg_rejection = bkg_rej
+                        n_sig_above_target = n_sig
+                        n_bkg_above_target = n_bkg
+                        significance_above_target = significance
                         signal_eff = sig_eff_target
             else:
-                (
-                    dnn_score_target,
-                    bkg_rejection,
-                    n_sig_above_target,
-                    n_bkg_above_target,
-                    significance_above_target,
-                ) = compute_significance(
+                dnn_score_target, bkg_rejection = find_threshold_and_bkg_rejection(
                     signal_eff,
-                    counts_test_list,
-                    bin_centers,
-                    bin_width,
                     sig_score_test_kl,
                     bkg_score_test,
                     sig_weight_test_kl,
                     bkg_weight_test,
-                    test_fraction,
-                    rescale,
+                )
+                n_sig_above_target, n_bkg_above_target, significance_above_target = (
+                    compute_significance(
+                        dnn_score_target,
+                        counts_test_list,
+                        bin_centers,
+                        bin_width,
+                        sig_weight_test_kl,
+                        bkg_weight_test,
+                        test_fraction,
+                        rescale,
+                    )
                 )
 
             print(
@@ -528,59 +410,158 @@ def plot_sig_bkg_distributions(
                 f"Significance ({dnn_score_target:.3f} DNN cut): {significance_above_target:.3f}"
             )
             # plot the vertical line for the signal efficiency
-            line_target = plt.axvline(
-                dnn_score_target,
-                color="grey",
-                linestyle="--",
-                label="Sig efficiency {:.2f}\nBkg rejection {:.2f}\nDNN score {:.2f}".format(
-                    signal_eff,
-                    bkg_rejection,
-                    dnn_score_target,
-                ),
+            lines.append(
+                {
+                    "x": dnn_score_target,
+                    "color": "grey",
+                    "linestyle": "--",
+                    "label": "Sig efficiency = {:.2f}\nBkg rejection = {:.2f}\nDNN score cut = {:.2f}".format(
+                        signal_eff,
+                        bkg_rejection,
+                        dnn_score_target,
+                    ),
+                }
             )
-            handles_legend.append(line_target)
 
-        ax_ratio.set_xlabel("Output score")
-        ax.set_ylabel("Normalized counts")
-        ax_ratio.set_ylabel("Test/Train")
-        ax_ratio.set_ylim(0.75, 1.25)
+        # Single overtraining plot with signal and background overlaid.
+        # The histograms are filled with weights normalized to unit integral,
+        # so that the four distributions can be compared with each other.
+        def normalized_hist(scores, weights):
+            h = Hist.new.Reg(50, 0, 1, name="score").Weight()
+            total = np.sum(weights)
+            h.fill(scores, weight=weights / total if total else weights)
+            return h
 
-        ax.legend(
-            loc="upper left",
-            # loc="center",
-            # bbox_to_anchor=(0.3, 0.9),
-            fontsize=20,
-            handles=handles_legend,
-            frameon=False,
-        )
-        ax.grid()
-        ax_ratio.grid()
-        # plt.plot([0.09, 0.88], [8.35, 8.35], color="lightgray", linestyle="-", transform=plt.gca().transAxes)
+        hist_sig_train = normalized_hist(sig_score_train_kl, sig_weight_train_kl)
+        hist_sig_test = normalized_hist(sig_score_test_kl, sig_weight_test_kl)
+        hist_bkg_train = normalized_hist(bkg_score_train, bkg_weight_train)
+        hist_bkg_test = normalized_hist(bkg_score_test, bkg_weight_test)
 
-        hep.cms.lumitext("2022 (13.6 TeV)", ax=ax)
-        hep.cms.text(
-            text="Preliminary",
-            ax=ax,
-            loc=0,
-        )
-        if comet_logger:
-            comet_logger.log_figure("sig_bkg_distributions", plt)
-        plt.savefig(f"{dir}/sig_bkg_distributions_kl_{kl_str}.png", bbox_inches="tight", dpi=300)
-        plt.savefig(f"{dir}/sig_bkg_distributions_kl_{kl_str}.pdf", bbox_inches="tight", dpi=300)
-        plt.savefig(f"{dir}/sig_bkg_distributions_kl_{kl_str}.svg", bbox_inches="tight", dpi=300)
-        ax.set_ylim(bottom=1e-2, top=max_bin**4)
-        ax.set_yscale("log")
-        if comet_logger:
-            comet_logger.log_figure("sig_bkg_distributions_log", plt)
-        plt.savefig(f"{dir}/sig_bkg_distributions_kl_{kl_str}_log.png", bbox_inches="tight", dpi=300)
-        plt.savefig(f"{dir}/sig_bkg_distributions_kl_{kl_str}_log.pdf", bbox_inches="tight", dpi=300)
-        plt.savefig(f"{dir}/sig_bkg_distributions_kl_{kl_str}_log.svg", bbox_inches="tight", dpi=300)
-        if show:
-            plt.show()
-        plt.close(fig)
+        series_dict = {
+            "Signal (training)": {
+                "data": hist_sig_train,
+                "style": {
+                    "color": SIG_COLOR,
+                    "histtype": "step",
+                    # "edgecolor": SIG_COLOR,
+                    # "facecolor": SIG_COLOR,
+                    # "alpha": 0.5,
+                },
+            },
+            "Signal (test)": {
+                "data": hist_sig_test,
+                "style": {"histtype": "errorbar", "color": SIG_COLOR},
+            },
+            "Background (training)": {
+                "data": hist_bkg_train,
+                "style": {"color": BKG_COLOR, "histtype": "step"},
+            },
+            "Background (test)": {
+                "data": hist_bkg_test,
+                "style": {"histtype": "errorbar", "color": BKG_COLOR},
+            },
+        }
+
+        chi2_sig, pvalue_sig = chi_square(hist_sig_test, hist_sig_train)
+        chi2_bkg, pvalue_bkg = chi_square(hist_bkg_test, hist_bkg_train)
+        print(f"\nchi2/ndof (sig) = {chi2_sig:.3f}, p-value = {pvalue_sig:.3f}")
+        print(f"chi2/ndof (bkg) = {chi2_bkg:.3f}, p-value = {pvalue_bkg:.3f}")
+
+        base = f"{dir}/sig_bkg_distributions_kl_{kl_tag}"
+
+        # the histograms are normalized to unit integral by HEPPlotter, so
+        # the same log range can be used for every training
+        for log in [False, True]:
+            plotter = (
+                HEPPlotter("CMS")
+                .set_plot_config(figsize=[13, 13], lumitext=LUMITEXT, cmstext="Private")
+                .set_output(f"{base}{'_log' if log else ''}")
+                .set_labels(
+                    xlabel="DNN Class Score",
+                    ylabel="Normalized counts",
+                )
+                .set_data(series_dict, plot_type="1d")
+                .set_options(
+                    legend_loc="upper left",
+                    legend_font_size=20,
+                    split_legend=False,
+                    grid=True,
+                    y_log=log,
+                    ylim_bottom_value=1e-4 if log else 0.0,
+                    ylim_top_value=5 if log else 0.15,
+                    # ylim_top_factor=2,
+                )
+                .add_annotation(
+                    x=0.6,
+                    y=0.95,
+                    s=f"KS sig: p-value = {p_value_sig:.2f}",
+                    fontsize=20,
+                    ha="left",
+                    va="center",
+                    color=SIG_COLOR,
+                )
+                .add_annotation(
+                    x=0.6,
+                    y=0.9,
+                    s=f"KS bkg: p-value = {p_value_bkg:.2f}",
+                    fontsize=20,
+                    ha="left",
+                    va="center",
+                    color=BKG_COLOR,
+                )
+                .add_annotation(
+                    x=0.6,
+                    y=0.85,
+                    s=r"$\chi^2$/ndof= {:.1f},".format(chi2_sig)
+                    + f"  p-value= {pvalue_sig:.2f}",
+                    fontsize=20,
+                    ha="left",
+                    va="center",
+                    color=SIG_COLOR,
+                )
+                .add_annotation(
+                    x=0.6,
+                    y=0.8,
+                    s=r"$\chi^2$/ndof= {:.1f},".format(chi2_bkg)
+                    + f"  p-value= {pvalue_bkg:.2f}",
+                    fontsize=20,
+                    ha="left",
+                    va="center",
+                    color=BKG_COLOR,
+                )
+                .add_annotation(
+                    x=0.6,
+                    y=0.75,
+                    s=rf"sig $\kappa_\lambda$ = {kl_str}",
+                    fontsize=20,
+                    ha="left",
+                    va="center",
+                    color=SIG_COLOR,
+                )
+                .add_annotation(
+                    x=0.6,
+                    y=0.7,
+                    s=rf"bkg $\kappa_\lambda$ = {kl_bkg_str if kl_bkg_str else 'all'}",
+                    fontsize=20,
+                    ha="left",
+                    va="center",
+                    color=BKG_COLOR,
+                )
+            )
+            for line in lines:
+                plotter.add_line("v", **line)
+            if show:
+                plotter.show()
+            plotter.run()
+
+            if comet_logger:
+                comet_logger.log_image(
+                    f"{base}{'_log' if log else ''}.png",
+                    name=f"sig_bkg_distributions{'_log' if log else ''}",
+                )
 
 
-def plot_roc_curve(score_lbl_tensor_test, dir, show, comet_logger=None, class_info=None):
+def plot_roc_curve(score_lbl_tensor_test, dir, show, comet_logger=None, class_info=None, kl_bkg_str=None):
     # Dispatch to multi-class ROCs when more than one score column is stored.
     n_score, label_col, weight_col, kl_col = get_layout(score_lbl_tensor_test)
     if n_score > 1:
@@ -602,44 +583,44 @@ def plot_roc_curve(score_lbl_tensor_test, dir, show, comet_logger=None, class_in
         sig_weight_test = np.ones_like(sig_score_test)
         bkg_weight_test = np.ones_like(bkg_score_test)
 
-    print("sig_weight_test",sig_weight_test, sig_weight_test.shape)
-    print("bkg_weight_test",bkg_weight_test, bkg_weight_test.shape)
+    print("sig_weight_test", sig_weight_test, sig_weight_test.shape)
+    print("bkg_weight_test", bkg_weight_test, bkg_weight_test.shape)
 
     # get the kl values
     try:
         sig_kl_test, bkg_kl_test = handle_arrays(score_lbl_tensor_test, kl_col)
     except IndexError:
         print("WARNING: No kl values found in the input file. Using equal weights.")
-        sig_kl_test = np.ones_like(sig_score_test) * 9999.
-        bkg_kl_test = np.ones_like(bkg_score_test) * 9999.
-    
-    print("sig_kl_test",sig_kl_test, sig_kl_test.shape)
-    print("bkg_kl_test",bkg_kl_test, bkg_kl_test.shape)
-    
+        sig_kl_test = np.ones_like(sig_score_test) * 9999.0
+        bkg_kl_test = np.ones_like(bkg_score_test) * 9999.0
+
+    print("sig_kl_test", sig_kl_test, sig_kl_test.shape)
+    print("bkg_kl_test", bkg_kl_test, bkg_kl_test.shape)
+
     kl_unique_values = list(np.unique(sig_kl_test))
-    print("kl_unique_values",kl_unique_values)
-    roc_info_dict={}
+    print("kl_unique_values", kl_unique_values)
+    roc_info_dict = {}
 
     # loop over the differetn kl for signal and take inclusively for bkg
     for kl in kl_unique_values + ["all"]:
         if kl != "all":
-            sig_score_test_kl=sig_score_test[sig_kl_test==kl]
-            sig_weight_test_kl=sig_weight_test[sig_kl_test==kl]
-            sig_lbl_test_kl=sig_lbl_test[sig_kl_test==kl]
+            sig_score_test_kl = sig_score_test[sig_kl_test == kl]
+            sig_weight_test_kl = sig_weight_test[sig_kl_test == kl]
+            sig_lbl_test_kl = sig_lbl_test[sig_kl_test == kl]
             kl_str = f"{kl:.2f}"
         else:
-            sig_score_test_kl=sig_score_test
-            sig_weight_test_kl=sig_weight_test
-            sig_lbl_test_kl=sig_lbl_test
+            sig_score_test_kl = sig_score_test
+            sig_weight_test_kl = sig_weight_test
+            sig_lbl_test_kl = sig_lbl_test
             kl_str = "all"
-            
-        score=np.concatenate((sig_score_test_kl, bkg_score_test))
-        weight=np.concatenate((sig_weight_test_kl, bkg_weight_test))
-        lbl=np.concatenate((sig_lbl_test_kl, bkg_lbl_test))
-                
-        # plot the ROC curve
-        fig, ax = plt.subplots()
 
+        kl_tag = kl_str.replace("-", "m").replace(".", "p")
+
+        score = np.concatenate((sig_score_test_kl, bkg_score_test))
+        weight = np.concatenate((sig_weight_test_kl, bkg_weight_test))
+        lbl = np.concatenate((sig_lbl_test_kl, bkg_lbl_test))
+
+        # plot the ROC curve
         fpr, tpr, _ = roc_curve(
             lbl,
             score,
@@ -650,8 +631,6 @@ def plot_roc_curve(score_lbl_tensor_test, dir, show, comet_logger=None, class_in
             score,
             sample_weight=weight,
         )
-        plt.plot(tpr, fpr, label=f"ROC curve - kl = {kl_str} (pos+neg weights AUC = {roc_auc:.3f})")
-        
 
         abs_weights_fpr, abs_weights_tpr, _ = roc_curve(
             lbl,
@@ -663,48 +642,127 @@ def plot_roc_curve(score_lbl_tensor_test, dir, show, comet_logger=None, class_in
             score,
             sample_weight=abs(weight),
         )
-        plt.plot(
-            abs_weights_tpr,
-            abs_weights_fpr,
-            label=f"ROC curve - kl = {kl_str} (abs weights AUC = {abs_weights_roc_auc:.3f})",
-        )
-        
+
         # save tpr and fpr in a npz file
-        
+
         roc_info_dict[f"tpr_kl_{kl_str}"] = tpr
         roc_info_dict[f"fpr_kl_{kl_str}"] = fpr
         roc_info_dict[f"abs_weights_tpr_kl_{kl_str}"] = abs_weights_tpr
         roc_info_dict[f"abs_weights_fpr_kl_{kl_str}"] = abs_weights_fpr
-        
-        
 
-        # plt.plot([0, 1], [0, 1], color="gray", linestyle="--")
-        plt.xlabel("True positive rate")
-        plt.ylabel("False positive rate")
-        plt.legend(loc="upper left", fontsize="small")
-        plt.yscale("log")
-        
-        hep.cms.lumitext(
-            "2022 (13.6 TeV)",
+        # the ROC curves are drawn as graphs without error bars
+        series_dict = {
+            f"ROC curve - kl = {kl_str} (pos+neg weights AUC = {roc_auc:.3f})": {
+                "data": {"x": [tpr, None], "y": [fpr, None]},
+                "style": {"linestyle": "-", "markersize": 0},
+            },
+            f"ROC curve - kl = {kl_str} (abs weights AUC = {abs_weights_roc_auc:.3f})": {
+                "data": {"x": [abs_weights_tpr, None], "y": [abs_weights_fpr, None]},
+                "style": {"linestyle": "-", "markersize": 0},
+            },
+        }
+
+        plotter = (
+            HEPPlotter("CMS")
+            .set_plot_config(lumitext=LUMITEXT)
+            .set_output(f"{dir}/roc_curve_kl_{kl_tag}")
+            .set_labels(xlabel="True positive rate", ylabel="False positive rate")
+            .set_data(series_dict, plot_type="graph")
+            .set_options(
+                y_log=True,
+                legend_loc="upper left",
+                legend_font_size="small",
+                split_legend=False,
+                grid=False,
+                set_ylim=False,
+            )
+            .add_annotation(
+                x=0.98,
+                y=0.05,
+                s=rf"sig $\kappa_\lambda$ = {kl_str}"
+                + "\n"
+                + rf"bkg $\kappa_\lambda$ = {kl_bkg_str if kl_bkg_str else 'all'}",
+                fontsize=16,
+                ha="right",
+                va="bottom",
+            )
         )
-        hep.cms.text(
-            text="Preliminary",
-            loc=0,
-        )
-        if comet_logger:
-            comet_logger.log_figure("roc_curve", plt)
-        plt.savefig(f"{dir}/roc_curve_kl_{kl_str}.png", bbox_inches="tight", dpi=300)
-        plt.savefig(f"{dir}/roc_curve_kl_{kl_str}.pdf", bbox_inches="tight", dpi=300)
-        plt.savefig(f"{dir}/roc_curve_kl_{kl_str}.svg", bbox_inches="tight", dpi=300)
         if show:
-            plt.show()
-        plt.close(fig)
-    
+            plotter.show()
+        plotter.run()
+
+        if comet_logger:
+            comet_logger.log_image(f"{dir}/roc_curve_kl_{kl_tag}.png", name="roc_curve")
+
     # save tpr and fpr in a npz file
-    np.savez(
-        f"{dir}/tpr_fpr.npz",
-        **roc_info_dict
-    )
+    np.savez(f"{dir}/tpr_fpr.npz", **roc_info_dict)
+
+
+def plot_kl_distributions(
+    score_lbl_train,
+    score_lbl_test,
+    out_dir,
+    kls_background_to_plot,
+    train_test_fraction,
+    show=False,
+    rescale=None,
+    signal_eff=0.8,
+    get_max_significance=False,
+    do_histos=True,
+    do_roc=True,
+    comet_logger=None,
+):
+    if rescale is None:
+        rescale = []
+    for kl_bkg in kls_background_to_plot:
+        kl_bkg_str = "all" if kl_bkg == "all" else f"{kl_bkg:.2f}"
+
+        if kl_bkg == "all":
+            train_data = score_lbl_train
+            test_data = score_lbl_test
+        else:
+            try:
+                sig_train = score_lbl_train[:, 1] == 1
+                bkg_train_kl = (score_lbl_train[:, 1] == 0) & (
+                    score_lbl_train[:, 3] == float(kl_bkg)
+                )
+                train_data = score_lbl_train[sig_train | bkg_train_kl]
+
+                sig_test = score_lbl_test[:, 1] == 1
+                bkg_test_kl = (score_lbl_test[:, 1] == 0) & (
+                    score_lbl_test[:, 3] == float(kl_bkg)
+                )
+                test_data = score_lbl_test[sig_test | bkg_test_kl]
+            except IndexError:
+                train_data = score_lbl_train
+                test_data = score_lbl_test
+
+        if do_histos:
+            sig_bkg_out_dir = f"{out_dir}/sig_bkg_bkgkl_{kl_bkg_str}"
+            os.makedirs(sig_bkg_out_dir, exist_ok=True)
+            plot_sig_bkg_distributions(
+                train_data,
+                test_data,
+                sig_bkg_out_dir,
+                show,
+                rescale,
+                train_test_fraction,
+                signal_eff=signal_eff,
+                get_max_significance=get_max_significance,
+                comet_logger=comet_logger,
+                kl_bkg_str=kl_bkg_str,
+            )
+
+        if do_roc:
+            roc_out_dir = f"{out_dir}/roc_bkgkl_{kl_bkg_str}"
+            os.makedirs(roc_out_dir, exist_ok=True)
+            plot_roc_curve(
+                test_data,
+                roc_out_dir,
+                show,
+                comet_logger=comet_logger,
+                kl_bkg_str=kl_bkg_str,
+            )
 
 
 def plot_multiclass_distributions(
@@ -925,8 +983,14 @@ def main():
     parser.add_argument(
         "-e", "--signal-eff", default=-1, help="Signal efficiency to cut", type=float
     )
-    
-    
+    parser.add_argument(
+        "-klb",
+        "--kl-background",
+        nargs="+",
+        default=["all", "1"],
+        help="Background kl values to plot. Use 'all' for the inclusive plot, numbers for specific kl values, or 'full' to plot every available kl (default: all 1).",
+    )
+
     parser.print_help()
     args = parser.parse_args()
 
@@ -951,15 +1015,34 @@ def main():
         class_info = list(np.load(input_file, allow_pickle=True)["class_info"])
     except KeyError:
         class_info = None
+    # resolve background kl values to plot
+    try:
+        bkg_mask = score_lbl_tensor_train[:, 1] == 0
+        kl_bkg_unique_values = list(np.unique(score_lbl_tensor_train[bkg_mask, 3]))
+    except IndexError:
+        kl_bkg_unique_values = [9999.0]
 
-    # plot the signal and background distributions
-    plot_sig_bkg_distributions(
+    if "full" in args.kl_background:
+        kls_background_to_plot = ["all"] + kl_bkg_unique_values
+    else:
+        kl_bkg_requested = set()
+        for v in args.kl_background:
+            kl_bkg_requested.add(v if v == "all" else float(v))
+        kls_background_to_plot = [
+            kl
+            for kl in ["all"] + kl_bkg_unique_values
+            if (kl if kl == "all" else float(kl)) in kl_bkg_requested
+        ]
+    print(f"Background kl values to plot: {kls_background_to_plot}")
+
+    plot_kl_distributions(
         score_lbl_tensor_train,
         score_lbl_tensor_test,
         args.input_dir,
-        args.show,
-        args.rescale,
+        kls_background_to_plot,
         train_test_fractions[1],
+        show=args.show,
+        rescale=args.rescale,
         signal_eff=args.signal_eff,
         get_max_significance=False,
         class_info=class_info,

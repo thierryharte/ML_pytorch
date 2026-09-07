@@ -49,6 +49,11 @@ gpus: '0'
 histos: True
 roc: True
 history: True
+# plot the input variable distributions of signal and background before the training
+input_plots: True
+input_plots_dir: input_variables
+input_plots_bins: 30
+input_plots_log: False
 eval_model: ''
 load_model: ''
 onnx: True

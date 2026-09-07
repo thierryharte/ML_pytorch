@@ -1,13 +1,17 @@
 import argparse
-import matplotlib.pyplot as plt
-import mplhep as hep
 from scipy.ndimage import uniform_filter1d
 import os
 import numpy as np
 from glob import glob
 
-hep.style.use("CMS")
-hep.cms.label(loc=0)
+import mplhep as hep
+from utils_configs.plot.HEPPlotter import HEPPlotter
+
+LUMITEXT = "2022 (13.6 TeV)"
+
+# CMS colour palette of mplhep, used consistently in all the plotting scripts
+CMS_COLORS = [cycle["color"] for cycle in hep.style.CMS["axes.prop_cycle"]]
+
 
 def read_from_txt(file):
     # get accuracy and loss and separate them between training and validation
@@ -17,7 +21,7 @@ def read_from_txt(file):
         train_loss = []
         val_accuracy = []
         val_loss = []
-        lr=[]
+        lr = []
         i = 0
         j = 0
         for line in lines:
@@ -43,7 +47,7 @@ def read_from_txt(file):
     print(train_loss)
     print("Validation loss:")
     print(val_loss)
-    return train_accuracy, train_loss, val_accuracy, val_loss,lr
+    return train_accuracy, train_loss, val_accuracy, val_loss, lr
 
 
 def plot_history(
@@ -66,83 +70,110 @@ def plot_history(
         "loss": "-",
     }
 
-    plt.figure()
-
+    # one graph per curve: the smoothed values as a function of the epoch
+    series_dict = {}
     for type, info in infos_dict.items():
         print("len info train: ", len(info["train"]))
         print("len info val: ", len(info["val"]))
-        plt.plot(
-            np.linspace(0, len(info["train"]) / 10, len(info["train"])),
-            # range(len(info["train"])),
-            uniform_filter1d(info["train"], size=uniform_filter),
-            label=f"Training {type}",
-            color="dodgerblue",
-            linestyle=line_style[type],
+
+        if len(info["train"]) == 0:
+            continue
+
+        series_dict[f"Training {type}"] = {
+            "data": {
+                "x": [
+                    np.linspace(0, len(info["train"]) / 10, len(info["train"])),
+                    None,
+                ],
+                "y": [uniform_filter1d(info["train"], size=uniform_filter), None],
+            },
+            "style": {
+                "color": CMS_COLORS[0],
+                "linestyle": line_style[type],
+                "markersize": 0,
+            },
+        }
+
+        if len(info["val"]) == 0:
+            continue
+
+        series_dict[f"Validation {type}"] = {
+            "data": {
+                "x": [
+                    np.linspace(
+                        0,
+                        (
+                            len(info["val"]) / 10
+                            if len(info["val"]) / 10 == len(info["train"]) / 10
+                            else len(info["train"]) / 10
+                        ),
+                        len(info["val"]),
+                    ),
+                    None,
+                ],
+                "y": [uniform_filter1d(info["val"], size=uniform_filter), None],
+            },
+            "style": {
+                "color": CMS_COLORS[1],
+                "linestyle": line_style[type],
+                "markersize": 0,
+            },
+        }
+
+    if not series_dict:
+        print("WARNING: no history to plot")
+        return
+
+    plotter = (
+        HEPPlotter("CMS")
+        .set_plot_config(lumitext=LUMITEXT)
+        .set_output(f"{dir}/history")
+        .set_labels(xlabel="Epoch", ylabel="")
+        .set_data(series_dict, plot_type="graph")
+        .set_options(
+            legend_loc="center right",
+            split_legend=False,
+            grid=True,
+            set_ylim=False,
         )
-        plt.plot(
-            np.linspace(
-                0,
-                len(info["val"]) / 10
-                if len(info["val"]) / 10 == len(info["train"]) / 10
-                else len(info["train"]) / 10,
-                len(info["val"]),
-            ),
-            # range(len(info["val"])),
-            uniform_filter1d(info["val"], size=uniform_filter),
-            label=f"Validation {type}",
-            color="r",
-            linestyle=line_style[type],
-        )
-
-    plt.xlabel("Epoch")
-    # plt.ylabel(type.capitalize())
-    # legend = ax.legend(frameon=False)
-    plt.legend(
-        # fontsize="15",
-        frameon=False,
-        loc="center right",
     )
-
-    hep.cms.lumitext(
-        "2022 (13.6 TeV)",
-    )
-    hep.cms.text(
-        text="Preliminary",
-        loc=0,
-    )
-
-    plt.grid()
-    if comet_logger:
-        comet_logger.log_figure("history", plt)
-    plt.savefig(f"{dir}/history.png", bbox_inches="tight")
-    plt.savefig(f"{dir}/history.pdf", bbox_inches="tight")
-    plt.savefig(f"{dir}/history.svg", bbox_inches="tight")
     if show:
-        plt.show()
+        plotter.show()
+    plotter.run()
+
+    if comet_logger:
+        comet_logger.log_image(f"{dir}/history.png", name="history")
+
 
 def plot_lr(lr, main_dir, show, comet_logger=None):
-    plt.figure()
-    plt.plot(lr)
-    plt.xlabel("Epoch")
-    plt.ylabel("Learning rate")
-    hep.cms.lumitext(
-        "2022 (13.6 TeV)",
-    )
-    hep.cms.text(
-        text="Preliminary",
-        loc=0,
-    )
-    plt.grid()
-    # log scale
-    plt.yscale("log")
-    if comet_logger:
-        comet_logger.log_figure("learning_rate", plt)
-    plt.savefig(f"{main_dir}/lr.png", bbox_inches="tight")
-    plt.savefig(f"{main_dir}/lr.pdf", bbox_inches="tight")
-    plt.savefig(f"{main_dir}/lr.svg", bbox_inches="tight")
-    if show:
-        plt.show()
+    if len(lr) == 0:
+        print("WARNING: no learning rate to plot")
+        return
 
+    series_dict = {
+        "Learning rate": {
+            "data": {
+                "x": [np.arange(len(lr)), None],
+                "y": [np.asarray(lr, dtype=float), None],
+            },
+            "style": {"color": CMS_COLORS[0], "linestyle": "-", "markersize": 0},
+        }
+    }
+
+    plotter = (
+        HEPPlotter("CMS")
+        .set_plot_config(lumitext=LUMITEXT)
+        .set_output(f"{main_dir}/lr")
+        .set_labels(xlabel="Epoch", ylabel="Learning rate")
+        .set_data(series_dict, plot_type="graph")
+        .set_options(y_log=True, legend=False, grid=True, set_ylim=False)
+    )
+    if show:
+        plotter.show()
+    plotter.run()
+
+    if comet_logger:
+        comet_logger.log_image(f"{main_dir}/lr.png", name="learning_rate")
 
 
 def main():
@@ -172,12 +203,12 @@ def main():
     )
     args = parser.parse_args()
 
-    #find the file starting with logger in args.input_path using os.listdir
-    log_file=args.input_path
+    # find the file starting with logger in args.input_path using os.listdir
+    log_file = args.input_path
 
     print(log_file)
 
-    train_accuracy, train_loss, val_accuracy, val_loss,lr = read_from_txt(log_file)
+    train_accuracy, train_loss, val_accuracy, val_loss, lr = read_from_txt(log_file)
 
     plot_history(
         train_accuracy,
@@ -189,8 +220,9 @@ def main():
         args.uniform_filter,
         args.lenght,
     )
-    
-    plot_lr(lr,os.path.dirname(args.input_path), args.show)
+
+    plot_lr(lr, os.path.dirname(args.input_path), args.show)
+
 
 if __name__ == "__main__":
     main()

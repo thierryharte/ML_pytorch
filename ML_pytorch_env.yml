@@ -1,4 +1,4 @@
-name: ML_pytorch_matteo
+name: ML_pytorch_new_env
 channels:
   - nvidia
   - conda-forge

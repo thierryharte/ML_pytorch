@@ -95,6 +95,38 @@ parser.add_argument(
     "--roc", default=None, help="Make roc curve of discrimination", action="store_true"
 )
 parser.add_argument(
+    "--input-plots",
+    dest="input_plots",
+    default=None,
+    help="Plot the input variable distributions of signal and background before training (default: True)",
+    action="store_true",
+)
+parser.add_argument(
+    "--no-input-plots",
+    dest="input_plots",
+    default=None,
+    help="Do not plot the input variable distributions of signal and background",
+    action="store_false",
+)
+parser.add_argument(
+    "--input-plots-dir",
+    default=None,
+    help="Subdirectory of the output directory where the input variable plots are saved",
+    type=str,
+)
+parser.add_argument(
+    "--input-plots-bins",
+    default=None,
+    help="Number of bins of the input variable histograms",
+    type=int,
+)
+parser.add_argument(
+    "--input-plots-log",
+    default=None,
+    help="Save also the input variable histograms with a logarithmic y axis",
+    action="store_true",
+)
+parser.add_argument(
     "--history", default=None, help="Plot training history", action="store_true"
 )
 parser.add_argument(
