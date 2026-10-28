@@ -402,11 +402,9 @@ def get_variables(
             # the None values of the inputs are padded with pad_value
             variables_array = np.array(
                 [
-
                     ak.to_numpy(ak.fill_none(variables_array[f], pad_value))
                     for f in input_variables + ["weights", "kl", "dataset_idx"]
                 ]
-                + [ak.to_numpy(variables_array[f]) for f in ["weights", "kl"]]
             )
 
             logger.info(f"variables_array complete shape {variables_array.shape}")
